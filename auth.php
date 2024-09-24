@@ -100,6 +100,8 @@ class AUTH
             unset($checkStmt);
         }
     }
+
+    
 }
 
 $auth = new AUTH();
