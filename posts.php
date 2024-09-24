@@ -220,17 +220,6 @@ class Posts
         $reaction_type = 'like'; // Default reaction type
 
         try {
-            // Check if the user has already liked the post
-            $checkQuery = "SELECT * FROM reactions WHERE user_id = :user_id AND post_id = :post_id";
-            $stmt = $this->conn->prepare($checkQuery);
-            $stmt->bindParam(':user_id', $user_id, PDO::PARAM_INT);
-            $stmt->bindParam(':post_id', $post_id, PDO::PARAM_INT);
-            $stmt->execute();
-
-            // If a record is found, the user has already liked the post
-            if ($stmt->rowCount() > 0) {
-                return json_encode(["error" => "User has already liked this post"]);
-            }
 
             // Insert the like into the reactions table
             $insertQuery = "INSERT INTO reactions (user_id, post_id, reaction_type, timestamp) VALUES (:user_id, :post_id, :reaction_type, NOW())";
@@ -238,13 +227,93 @@ class Posts
             $stmt->bindParam(':user_id', $user_id, PDO::PARAM_INT);
             $stmt->bindParam(':post_id', $post_id, PDO::PARAM_INT);
             $stmt->bindParam(':reaction_type', $reaction_type, PDO::PARAM_STR);
-            $stmt->execute();
+            if ($stmt->execute()) {
+                return json_encode(["success" => "Post liked successfully"]);
+            } else {
+                return json_encode(["error" => "Something went wrong liking the post"]);
+            }
 
-            return json_encode(["success" => true, "message" => "Post liked successfully"]);
         } catch (PDOException $e) {
             return json_encode(["error" => "Failed to like post: " . $e->getMessage()]);
         } finally {
             $stmt = null; // Cleanup
+        }
+    }
+
+    public function dislikePost($json)
+    {
+        $data = json_decode($json, true);
+
+        // Validate input
+        if (!isset($data['user_id']) || !isset($data['post_id'])) {
+            return json_encode(["error" => "Missing Data"]);
+        }
+
+        $user_id = (int) sanitizeInput($data['user_id']);
+        $post_id = (int) sanitizeInput($data['post_id']);
+
+        try {
+            // Check if the user has liked the post
+            $checkQuery = "SELECT * FROM reactions WHERE user_id = :user_id AND post_id = :post_id";
+            $stmt = $this->conn->prepare($checkQuery);
+            $stmt->bindParam(':user_id', $user_id, PDO::PARAM_INT);
+            $stmt->bindParam(':post_id', $post_id, PDO::PARAM_INT);
+            $stmt->execute();
+
+            // If a record is found, the user can dislike the post
+            if ($stmt->rowCount() === 0) {
+                return json_encode(["error" => "User has not liked this post"]);
+            }
+
+            // Delete the like from the reactions table
+            $deleteQuery = "DELETE FROM reactions WHERE user_id = :user_id AND post_id = :post_id";
+            $stmt = $this->conn->prepare($deleteQuery);
+            $stmt->bindParam(':user_id', $user_id, PDO::PARAM_INT);
+            $stmt->bindParam(':post_id', $post_id, PDO::PARAM_INT);
+            if ($stmt->execute()) {
+                return json_encode(["success" => "Post disliked successfully"]);
+            } else {
+                return json_encode(value: ["error" => "Something went wrong unliking the post"]);
+            }
+
+
+        } catch (PDOException $e) {
+            return json_encode(["error" => "Failed to dislike post: " . $e->getMessage()]);
+        } finally {
+            $stmt = null; // Cleanup
+        }
+    }
+
+    public function getCommentsByPostId($json)
+    {
+        $data = json_decode($json, true);
+
+        // Validate and sanitize input
+        if (!isset($data['post_id'])) {
+            return json_encode(["error" => "Post ID is required"]);
+        }
+
+        $post_id = (int) sanitizeInput($data['post_id']);
+
+        try {
+            // SQL query to get comments based on post_id
+            $sql = 'SELECT comments.`comment_id`, comments.`post_id`, comments.`user_id`, comments.`content`, comments.`timestamp`, 
+                       users.first_name, users.last_name, users.username, users.profile_image
+                FROM `comments`
+                JOIN `users` ON comments.`user_id` = users.`user_id`
+                WHERE comments.`post_id` = :post_id
+                ORDER BY comments.`timestamp` ASC';
+
+            $stmt = $this->conn->prepare($sql);
+            $stmt->bindParam(':post_id', $post_id, PDO::PARAM_INT);
+            $stmt->execute();
+
+            $comments = $stmt->fetchAll(PDO::FETCH_ASSOC);
+            return json_encode(array("success" => $comments));
+        } catch (PDOException $e) {
+            return json_encode(array("error" => $e->getMessage()));
+        } finally {
+            unset($stmt);
         }
     }
 
@@ -279,6 +348,13 @@ try {
                     echo $posts->likePost($json);
                     break;
 
+                case "dislikePost":
+                    echo $posts->dislikePost($json);
+                    break;
+
+                case "getComments":
+                    echo $posts->getCommentsByPostId($json);
+                    break;
 
                 default:
                     echo json_encode(array("error" => "Invalid Operation"));
