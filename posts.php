@@ -316,25 +316,92 @@ class Posts
             return json_encode(["error" => "Post ID is required"]);
         }
 
+        // Check if user_id is provided to check if the user liked the comment
+        if (!isset($data['user_id'])) {
+            return json_encode(["error" => "User ID is required"]);
+        }
+
         $post_id = (int) sanitizeInput($data['post_id']);
+        $user_id = (int) sanitizeInput($data['user_id']);
 
         try {
-            // SQL query to get comments based on post_id
-            $sql = 'SELECT comments.`comment_id`, comments.`post_id`, comments.`user_id`, comments.`content`, comments.`timestamp`, 
-                       users.first_name, users.last_name, users.username, users.profile_image
-                FROM `comments`
-                JOIN `users` ON comments.`user_id` = users.`user_id`
-                WHERE comments.`post_id` = :post_id
-                ORDER BY comments.`timestamp` DESC';
+            // SQL query to get comments and check if the user has liked each comment, and also get comment replies with user info
+            $sql = "SELECT 
+                        comments.`comment_id`, 
+                        comments.`post_id`, 
+                        comments.`user_id`, 
+                        comments.`content`, 
+                        comments.`timestamp`,
+                        users.first_name, 
+                        users.last_name, 
+                        users.username, 
+                        users.profile_image,
+                        CASE 
+                            WHEN comment_reactions.reaction_id IS NOT NULL THEN 1 
+                            ELSE 0 
+                        END AS liked_by_user,
+                        comment_replies.`reply_id`, 
+                        comment_replies.`comment_id` AS parent_comment_id, 
+                        comment_replies.`content` AS reply_content, 
+                        comment_replies.`timestamp` AS reply_timestamp,
+                        reply_users.first_name AS reply_first_name,
+                        reply_users.last_name AS reply_last_name,
+                        reply_users.username AS reply_username,
+                        reply_users.profile_image AS reply_profile_image
+                    FROM `comments`
+                    JOIN `users` ON comments.`user_id` = users.`user_id`
+                    LEFT JOIN `comment_reactions` ON comments.`comment_id` = comment_reactions.`comment_id`
+                        AND comment_reactions.`user_id` = :user_id
+                    LEFT JOIN `comment_replies` ON comments.`comment_id` = comment_replies.`comment_id`
+                    LEFT JOIN `users` AS reply_users ON comment_replies.`user_id` = reply_users.`user_id`
+                    WHERE comments.`post_id` = :post_id
+                    ORDER BY comments.`timestamp` DESC";
 
             $stmt = $this->conn->prepare($sql);
             $stmt->bindParam(':post_id', $post_id, PDO::PARAM_INT);
+            $stmt->bindParam(':user_id', $user_id, PDO::PARAM_INT);
             $stmt->execute();
 
             $comments = $stmt->fetchAll(PDO::FETCH_ASSOC);
-            return json_encode(array("success" => $comments));
+
+            // Structuring the comments and replies
+            $structuredComments = [];
+            foreach ($comments as $comment) {
+                $commentId = $comment['comment_id'];
+                if (!isset($structuredComments[$commentId])) {
+                    // Create a new comment entry
+                    $structuredComments[$commentId] = [
+                        'comment_id' => $commentId,
+                        'post_id' => $comment['post_id'],
+                        'user_id' => $comment['user_id'],
+                        'content' => $comment['content'],
+                        'timestamp' => $comment['timestamp'],
+                        'first_name' => $comment['first_name'],
+                        'last_name' => $comment['last_name'],
+                        'username' => $comment['username'],
+                        'profile_image' => $comment['profile_image'],
+                        'liked_by_user' => $comment['liked_by_user'],
+                        'replies' => [] // Initialize replies array
+                    ];
+                }
+
+                // Check if there is a reply and add it to the replies array
+                if (!empty($comment['reply_id'])) {
+                    $structuredComments[$commentId]['replies'][] = [
+                        'reply_id' => $comment['reply_id'],
+                        'content' => $comment['reply_content'],
+                        'timestamp' => $comment['reply_timestamp'],
+                        'first_name' => $comment['reply_first_name'],
+                        'last_name' => $comment['reply_last_name'],
+                        'username' => $comment['reply_username'],
+                        'profile_image' => $comment['reply_profile_image']
+                    ];
+                }
+            }
+
+            return json_encode(["success" => array_values($structuredComments)]);
         } catch (PDOException $e) {
-            return json_encode(array("error" => $e->getMessage()));
+            return json_encode(["error" => $e->getMessage()]);
         } finally {
             unset($stmt);
         }
@@ -378,6 +445,8 @@ class Posts
         $data = json_decode($json, true);
 
         if (!isset($data['user_id']) || !isset($data['comment_id'])) {
+
+
             return json_encode(["error" => "Missing Data"]);
         }
 
@@ -402,7 +471,6 @@ class Posts
             $stmt = null; // Cleanup
         }
     }
-
 
     public function unlikeComment($json)
     {
