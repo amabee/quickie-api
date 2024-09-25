@@ -1,6 +1,5 @@
 <?php
 date_default_timezone_set('Asia/Manila');
-
 header('Content-Type: application/json');
 header('Access-Control-Allow-Origin: *');
 header('Access-Control-Allow-Methods: POST, GET, PUT, DELETE, OPTIONS');
@@ -50,7 +49,7 @@ class Posts
             $stmt->execute();
 
             $post_id = $this->conn->lastInsertId();
-
+            error_log($expiry_datetime);
             // Handle image uploads
             $image_names = [];
             if (isset($_FILES['images']) && is_array($_FILES['images']['name'])) {
@@ -91,6 +90,7 @@ class Posts
 
             $this->conn->commit();
             echo json_encode(array("success" => true, "message" => "Post created successfully", "image_names" => $image_names));
+
         } catch (PDOException $e) {
             $this->conn->rollBack();
             echo json_encode(array("success" => false, "message" => "Failed to create post: " . $e->getMessage()));
@@ -105,11 +105,16 @@ class Posts
     // Read all posts
     public function readPosts($json)
     {
+        $this->deleteExpiredPosts();
         $json = json_decode($json, true);
         $stmt = null;
         try {
             // Sanitize input data
             $json = sanitizeInput($json);
+
+            // Set default limit and offset if not provided
+            $limit = isset($json['limit']) ? (int) $json['limit'] : 10;
+            $offset = isset($json['offset']) ? (int) $json['offset'] : 0;
 
             // SQL query to get posts, their authors, images, and reactions (if liked by the user)
             $sql = 'SELECT posts.`post_id`, posts.`user_id`, posts.`content`, posts.`timestamp`, posts.`expiry_duration`, 
@@ -123,10 +128,13 @@ class Posts
                     LEFT JOIN `reactions` ON posts.`post_id` = reactions.`post_id` AND reactions.`user_id` = :userId
                     WHERE follows.`follower_id` = :userId OR posts.`user_id` = :userId
                     GROUP BY posts.`post_id`
-                    ORDER BY posts.`timestamp` DESC';
+                    ORDER BY posts.`timestamp` DESC
+                    LIMIT :limit OFFSET :offset';
 
             $stmt = $this->conn->prepare($sql);
             $stmt->bindParam(':userId', $json['userId'], PDO::PARAM_INT);
+            $stmt->bindParam(':limit', $limit, PDO::PARAM_INT);
+            $stmt->bindParam(':offset', $offset, PDO::PARAM_INT);
             $stmt->execute();
 
             $posts = $stmt->fetchAll(PDO::FETCH_ASSOC);
@@ -137,6 +145,21 @@ class Posts
             unset($stmt);
         }
         return $result;
+    }
+
+    // Delete Expired Posts
+    private function deleteExpiredPosts()
+    {
+        try {
+            $sql = "DELETE FROM posts WHERE expiry_duration < NOW()";
+            $stmt = $this->conn->prepare($sql);
+            $stmt->execute();
+
+        } catch (PDOException $e) {
+            echo json_encode(array("exception" => $e->getMessage()));
+        } finally {
+            unset($stmt);
+        }
     }
 
     // Update a post
@@ -302,7 +325,7 @@ class Posts
                 FROM `comments`
                 JOIN `users` ON comments.`user_id` = users.`user_id`
                 WHERE comments.`post_id` = :post_id
-                ORDER BY comments.`timestamp` ASC';
+                ORDER BY comments.`timestamp` DESC';
 
             $stmt = $this->conn->prepare($sql);
             $stmt->bindParam(':post_id', $post_id, PDO::PARAM_INT);
@@ -314,6 +337,39 @@ class Posts
             return json_encode(array("error" => $e->getMessage()));
         } finally {
             unset($stmt);
+        }
+    }
+
+    public function sendComment($json)
+    {
+        $data = json_decode($json, true);
+
+        // Validate input
+        if (!isset($data['post_id']) || !isset($data['user_id']) || !isset($data['content'])) {
+            return json_encode(["error" => "Missing Data"]);
+        }
+
+        $post_id = (int) sanitizeInput($data['post_id']);
+        $user_id = (int) sanitizeInput($data['user_id']);
+        $content = sanitizeInput($data['content']);
+
+        try {
+            // Insert the comment into the comments table
+            $insertQuery = "INSERT INTO comments (post_id, user_id, content, timestamp) VALUES (:post_id, :user_id, :content, NOW())";
+            $stmt = $this->conn->prepare($insertQuery);
+            $stmt->bindParam(':post_id', $post_id, PDO::PARAM_INT);
+            $stmt->bindParam(':user_id', $user_id, PDO::PARAM_INT);
+            $stmt->bindParam(':content', $content, PDO::PARAM_STR);
+
+            if ($stmt->execute()) {
+                return json_encode(["success" => "Comment posted successfully"]);
+            } else {
+                return json_encode(["error" => "Failed to post comment"]);
+            }
+        } catch (PDOException $e) {
+            return json_encode(["error" => "Failed to post comment: " . $e->getMessage()]);
+        } finally {
+            $stmt = null;
         }
     }
 
@@ -354,6 +410,10 @@ try {
 
                 case "getComments":
                     echo $posts->getCommentsByPostId($json);
+                    break;
+
+                case "sendComment":
+                    echo $posts->sendComment($json);
                     break;
 
                 default:
