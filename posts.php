@@ -373,6 +373,67 @@ class Posts
         }
     }
 
+    public function likeComment($json)
+    {
+        $data = json_decode($json, true);
+
+        if (!isset($data['user_id']) || !isset($data['comment_id'])) {
+            return json_encode(["error" => "Missing Data"]);
+        }
+
+        $user_id = (int) sanitizeInput($data['user_id']);
+        $comment_id = (int) sanitizeInput($data['comment_id']);
+        $reaction_type = 'liked';
+
+        try {
+            $insertQuery = "INSERT INTO comment_reactions (user_id, comment_id, reaction_type, timestamp) VALUES (:user_id, :comment_id, :reaction_type, NOW())";
+            $stmt = $this->conn->prepare($insertQuery);
+            $stmt->bindParam(':user_id', $user_id, PDO::PARAM_INT);
+            $stmt->bindParam(':comment_id', $comment_id, PDO::PARAM_INT);
+            $stmt->bindParam(':reaction_type', $reaction_type, PDO::PARAM_STR);
+            if ($stmt->execute()) {
+                return json_encode(["success" => "Comment liked successfully"]);
+            } else {
+                return json_encode(["error" => "Something went wrong liking the comment"]);
+            }
+        } catch (PDOException $e) {
+            return json_encode(["error" => "Failed to like comment: " . $e->getMessage()]);
+        } finally {
+            $stmt = null; // Cleanup
+        }
+    }
+
+
+    public function unlikeComment($json)
+    {
+        $data = json_decode($json, true);
+
+        // Validate input
+        if (!isset($data['user_id']) || !isset($data['comment_id'])) {
+            return json_encode(["error" => "Missing Data"]);
+        }
+
+        $user_id = (int) sanitizeInput($data['user_id']);
+        $comment_id = (int) sanitizeInput($data['comment_id']);
+
+        try {
+            // Delete the like from the comment_reactions table
+            $deleteQuery = "DELETE FROM comment_reactions WHERE user_id = :user_id AND comment_id = :comment_id";
+            $stmt = $this->conn->prepare($deleteQuery);
+            $stmt->bindParam(':user_id', $user_id, PDO::PARAM_INT);
+            $stmt->bindParam(':comment_id', $comment_id, PDO::PARAM_INT);
+            if ($stmt->execute()) {
+                return json_encode(["success" => "Comment unliked successfully"]);
+            } else {
+                return json_encode(["error" => "Something went wrong unliking the comment"]);
+            }
+        } catch (PDOException $e) {
+            return json_encode(["error" => "Failed to dislike comment: " . $e->getMessage()]);
+        } finally {
+            $stmt = null; // Cleanup
+        }
+    }
+
 }
 
 $posts = new Posts();
@@ -414,6 +475,14 @@ try {
 
                 case "sendComment":
                     echo $posts->sendComment($json);
+                    break;
+
+                case "likeComment":
+                    echo $posts->likeComment($json);
+                    break;
+
+                case "unlikeComment":
+                    echo $posts->unlikeComment($json);
                     break;
 
                 default:
