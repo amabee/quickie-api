@@ -326,19 +326,19 @@ class Posts
     public function getCommentsByPostId($json)
     {
         $data = json_decode($json, true);
-
+    
         // Validate and sanitize input
         if (!isset($data['post_id'])) {
             return json_encode(["error" => "Post ID is required"]);
         }
-
+    
         if (!isset($data['user_id'])) {
             return json_encode(["error" => "User ID is required"]);
         }
-
+    
         $post_id = (int) sanitizeInput($data['post_id']);
         $user_id = (int) sanitizeInput($data['user_id']);
-
+    
         try {
             // Fetch main comments
             $sqlMainComments = "SELECT 
@@ -359,14 +359,14 @@ class Posts
                             LEFT JOIN comment_reactions cr ON c.comment_id = cr.comment_id AND cr.user_id = :user_id
                             WHERE c.post_id = :post_id
                             ORDER BY c.timestamp DESC";
-
+    
             $stmtMainComments = $this->conn->prepare($sqlMainComments);
             $stmtMainComments->bindParam(':post_id', $post_id, PDO::PARAM_INT);
             $stmtMainComments->bindParam(':user_id', $user_id, PDO::PARAM_INT);
             $stmtMainComments->execute();
-
+    
             $mainComments = $stmtMainComments->fetchAll(PDO::FETCH_ASSOC);
-
+    
             // Fetch all replies, including whether the current user liked them
             $sqlReplies = "SELECT 
                             ct.id, 
@@ -388,15 +388,15 @@ class Posts
                         LEFT JOIN reply_reactions rr ON ct.id = rr.reply_id AND rr.user_id = :user_id
                         WHERE ct.post_id = :post_id
                         ORDER BY ct.timestamp";
-
+    
             $stmtReplies = $this->conn->prepare($sqlReplies);
             $stmtReplies->bindParam(':post_id', $post_id, PDO::PARAM_INT);
             $stmtReplies->bindParam(':user_id', $user_id, PDO::PARAM_INT);
             $stmtReplies->execute();
-
+    
             $replies = $stmtReplies->fetchAll(PDO::FETCH_ASSOC);
-
-            // Group replies by parent_id
+    
+            // Group replies by main_id and parent_id
             $replyMap = [];
             foreach ($replies as $reply) {
                 $replyData = [
@@ -413,25 +413,25 @@ class Posts
                     'liked_by_user' => $reply['liked_by_user'],
                     'replies' => [] // Initialize empty array for child replies
                 ];
-
-                // Group replies by parent_id
-                $replyMap[$reply['parent_id']][] = $replyData;
+    
+                // Group replies by main_id and parent_id
+                $replyMap[$reply['main_id']][$reply['parent_id']][] = $replyData;
             }
-
+    
             // Recursive function to structure nested replies
-            function buildReplyTree($parentId, &$replyMap)
+            function buildReplyTree($parentId, $mainId, &$replyMap)
             {
                 $nestedReplies = [];
-                if (isset($replyMap[$parentId])) {
-                    foreach ($replyMap[$parentId] as $reply) {
+                if (isset($replyMap[$mainId][$parentId])) {
+                    foreach ($replyMap[$mainId][$parentId] as $reply) {
                         // Recursively get the replies for this reply
-                        $reply['replies'] = buildReplyTree($reply['id'], $replyMap);
+                        $reply['replies'] = buildReplyTree($reply['id'], $mainId, $replyMap);
                         $nestedReplies[] = $reply;
                     }
                 }
                 return $nestedReplies;
             }
-
+    
             // Structure comments and their replies
             $structuredComments = [];
             foreach ($mainComments as $comment) {
@@ -447,15 +447,15 @@ class Posts
                     'liked_by_user' => $comment['liked_by_user'],
                     'replies' => []
                 ];
-
+    
                 // Add top-level replies (where parent_id is null) to this comment
-                $commentData['replies'] = buildReplyTree(null, $replyMap);
-
+                $commentData['replies'] = buildReplyTree(null, $comment['comment_id'], $replyMap);
+    
                 $structuredComments[] = $commentData;
             }
-
+    
             return json_encode(["success" => $structuredComments]);
-
+    
         } catch (PDOException $e) {
             error_log($e->getMessage());
             return json_encode(["error" => $e->getMessage()]);
