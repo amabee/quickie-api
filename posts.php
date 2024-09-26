@@ -197,7 +197,6 @@ class Posts
         }
         return $result;
     }
-
     // Delete a post
     public function deletePost($json)
     {
@@ -359,7 +358,7 @@ class Posts
                             JOIN users u ON c.user_id = u.user_id
                             LEFT JOIN comment_reactions cr ON c.comment_id = cr.comment_id AND cr.user_id = :user_id
                             WHERE c.post_id = :post_id
-                            ORDER BY c.timestamp";
+                            ORDER BY c.timestamp DESC";
 
             $stmtMainComments = $this->conn->prepare($sqlMainComments);
             $stmtMainComments->bindParam(':post_id', $post_id, PDO::PARAM_INT);
@@ -368,7 +367,7 @@ class Posts
 
             $mainComments = $stmtMainComments->fetchAll(PDO::FETCH_ASSOC);
 
-            // Fetch all replies
+            // Fetch all replies, including whether the current user liked them
             $sqlReplies = "SELECT 
                             ct.id, 
                             ct.parent_id,
@@ -381,12 +380,12 @@ class Posts
                             u.username, 
                             u.profile_image,
                             CASE 
-                                WHEN cr.reaction_id IS NOT NULL THEN 1 
+                                WHEN rr.reaction_id IS NOT NULL THEN 1 
                                 ELSE 0 
                             END AS liked_by_user
                         FROM comment_threads ct
                         JOIN users u ON ct.user_id = u.user_id
-                        LEFT JOIN comment_reactions cr ON ct.id = cr.comment_id AND cr.user_id = :user_id
+                        LEFT JOIN reply_reactions rr ON ct.id = rr.reply_id AND rr.user_id = :user_id
                         WHERE ct.post_id = :post_id
                         ORDER BY ct.timestamp";
 
@@ -397,12 +396,8 @@ class Posts
 
             $replies = $stmtReplies->fetchAll(PDO::FETCH_ASSOC);
 
-            // return json_encode(["replies" => $replies, "mains: " => $mainComments]);
-
-            // Structure comments and replies
-            $structuredComments = [];
+            // Group replies by parent_id
             $replyMap = [];
-
             foreach ($replies as $reply) {
                 $replyData = [
                     'id' => $reply['id'],
@@ -416,18 +411,29 @@ class Posts
                     'username' => $reply['username'],
                     'profile_image' => $reply['profile_image'],
                     'liked_by_user' => $reply['liked_by_user'],
-                    'replies' => []
+                    'replies' => [] // Initialize empty array for child replies
                 ];
 
-                if ($reply['parent_id'] === null) {
-                    $replyMap[$reply['id']] = $replyData;
-                } else {
-                    if (isset($replyMap[$reply['parent_id']])) {
-                        $replyMap[$reply['parent_id']]['replies'][] = $replyData;
-                    }
-                }
+                // Group replies by parent_id
+                $replyMap[$reply['parent_id']][] = $replyData;
             }
 
+            // Recursive function to structure nested replies
+            function buildReplyTree($parentId, &$replyMap)
+            {
+                $nestedReplies = [];
+                if (isset($replyMap[$parentId])) {
+                    foreach ($replyMap[$parentId] as $reply) {
+                        // Recursively get the replies for this reply
+                        $reply['replies'] = buildReplyTree($reply['id'], $replyMap);
+                        $nestedReplies[] = $reply;
+                    }
+                }
+                return $nestedReplies;
+            }
+
+            // Structure comments and their replies
+            $structuredComments = [];
             foreach ($mainComments as $comment) {
                 $commentData = [
                     'comment_id' => $comment['comment_id'],
@@ -442,13 +448,8 @@ class Posts
                     'replies' => []
                 ];
 
-                // Add top-level replies to this comment
-                foreach ($replyMap as $reply) {
-                    if ($reply['main_id'] == $comment['comment_id'] && $reply['parent_id'] === null) {
-                        $commentData['replies'][] = $reply;
-                    }
-                    //$commentData['replies'][] = $reply;
-                }
+                // Add top-level replies (where parent_id is null) to this comment
+                $commentData['replies'] = buildReplyTree(null, $replyMap);
 
                 $structuredComments[] = $commentData;
             }
@@ -462,7 +463,6 @@ class Posts
             unset($stmtMainComments, $stmtReplies);
         }
     }
-
 
     public function sendComment($json)
     {
@@ -575,6 +575,156 @@ class Posts
         }
     }
 
+    public function addCommentReply($json)
+    {
+        $data = json_decode($json, true);
+
+        // Validate input
+        if (!isset($data['user_id'])) {
+            return json_encode(["error" => "Missing User ID"]);
+        }
+
+        if (!isset($data['post_id'])) {
+            return json_encode(["error" => "Missing Post ID"]);
+        }
+
+        if (!isset($data['content'])) {
+            return json_encode(["error" => "Missing Content"]);
+        }
+
+        if (!isset($data['main_id'])) {
+            return json_encode(["error" => "Missing Main ID"]);
+        }
+
+        // Sanitize inputs
+        $user_id = (int) sanitizeInput($data['user_id']);
+        $post_id = (int) sanitizeInput($data['post_id']);
+        $main_id = (int) sanitizeInput($data['main_id']);
+        $content = sanitizeInput($data['content']);
+        $timestamp = date('Y-m-d H:i:s'); // Get the current timestamp
+
+        // Check if parent_id is set
+        $parent_id = isset($data['parent_id']) ? (int) sanitizeInput($data['parent_id']) : null;
+
+        try {
+            // Insert the new comment thread into the comment_threads table
+            $insertQuery = "INSERT INTO comment_threads (parent_id, post_id, user_id, main_id, content, timestamp) 
+                    VALUES (:parent_id, :post_id, :user_id, :main_id, :content, :timestamp)";
+            $stmt = $this->conn->prepare($insertQuery);
+            $stmt->bindParam(':user_id', $user_id, PDO::PARAM_INT);
+            $stmt->bindParam(':post_id', $post_id, PDO::PARAM_INT);
+            $stmt->bindParam(':main_id', $main_id, PDO::PARAM_INT);
+            $stmt->bindParam(':content', $content, PDO::PARAM_STR);
+            $stmt->bindParam(':timestamp', $timestamp);
+
+            // Bind parent_id, allow it to be null
+            if ($parent_id !== null) {
+                $stmt->bindParam(':parent_id', $parent_id, PDO::PARAM_INT);
+            } else {
+                $stmt->bindValue(':parent_id', null, PDO::PARAM_NULL);
+            }
+
+            if ($stmt->execute()) {
+                return json_encode(["success" => "Comment added successfully", "id" => $this->conn->lastInsertId()]);
+            } else {
+                return json_encode(["error" => "Failed to add comment. Please try again."]);
+            }
+        } catch (PDOException $e) {
+            return json_encode(["error" => "Error occurred: " . $e->getMessage()]);
+        } finally {
+            $stmt = null; // Cleanup
+        }
+    }
+    public function likeReply($json)
+    {
+        $data = json_decode($json, true);
+
+        if (!isset($data['user_id'])) {
+            return json_encode(["error" => "Missing User ID"]);
+        }
+
+        if (!isset($data['reply_id'])) {
+            return json_encode(["error" => "Missing Reply ID"]);
+        }
+
+        $user_id = (int) sanitizeInput($data['user_id']);
+        $reply_id = (int) sanitizeInput($data['reply_id']);
+        $reaction_type = 'liked';
+
+        try {
+            // Check if the user has already liked this reply
+            $checkQuery = "SELECT COUNT(*) FROM reply_reactions WHERE user_id = :user_id AND reply_id = :reply_id AND reaction_type = :reaction_type";
+            $stmt = $this->conn->prepare($checkQuery);
+            $stmt->bindParam(':user_id', $user_id, PDO::PARAM_INT);
+            $stmt->bindParam(':reply_id', $reply_id, PDO::PARAM_INT);
+            $stmt->bindParam(':reaction_type', $reaction_type, PDO::PARAM_STR);
+            $stmt->execute();
+
+            if ($stmt->fetchColumn() > 0) {
+                return json_encode(["error" => "You have already liked this reply"]);
+            }
+
+            // Insert the like into the comment_reactions table
+            $insertQuery = "INSERT INTO `reply_reactions`(`reply_id`, `user_id`, `reaction_type`, `timestamp`) VALUES (:reply_id, :user_id, :reaction_type, NOW())";
+            $stmt = $this->conn->prepare($insertQuery);
+            $stmt->bindParam(':user_id', $user_id, PDO::PARAM_INT);
+            $stmt->bindParam(':reply_id', $reply_id, PDO::PARAM_INT);
+            $stmt->bindParam(':reaction_type', $reaction_type, PDO::PARAM_STR);
+
+            if ($stmt->execute()) {
+                return json_encode(["success" => "Reply liked successfully"]);
+            } else {
+                return json_encode(["error" => "Failed to like reply. Please try again."]);
+            }
+        } catch (PDOException $e) {
+            return json_encode(["error" => "Error occurred: " . $e->getMessage()]);
+        } finally {
+            $stmt = null; // Cleanup
+        }
+    }
+
+    public function unlikeReply($json)
+    {
+        $data = json_decode($json, true);
+
+        if (!isset($data['user_id']) || !isset($data['reply_id'])) {
+            return json_encode(["error" => "Missing User ID or Reply ID"]);
+        }
+
+        $user_id = (int) sanitizeInput($data['user_id']);
+        $reply_id = (int) sanitizeInput($data['reply_id']);
+
+        try {
+            // Check if the like exists before trying to delete
+            $checkQuery = "SELECT COUNT(*) FROM reply_reactions WHERE user_id = :user_id AND reply_id = :reply_id AND reaction_type = 'liked'";
+            $stmt = $this->conn->prepare($checkQuery);
+            $stmt->bindParam(':user_id', $user_id, PDO::PARAM_INT);
+            $stmt->bindParam(':reply_id', $reply_id, PDO::PARAM_INT);
+            $stmt->execute();
+
+            if ($stmt->fetchColumn() == 0) {
+                return json_encode(["error" => "You have not liked this reply"]);
+            }
+
+            // Delete the like from the comment_reactions table
+            $deleteQuery = "DELETE FROM reply_reactions WHERE user_id = :user_id AND reply_id = :reply_id AND reaction_type = 'liked'";
+            $stmt = $this->conn->prepare($deleteQuery);
+            $stmt->bindParam(':user_id', $user_id, PDO::PARAM_INT);
+            $stmt->bindParam(':reply_id', $reply_id, PDO::PARAM_INT);
+
+            if ($stmt->execute()) {
+                return json_encode(["success" => "Reply unliked successfully"]);
+            } else {
+                return json_encode(["error" => "Failed to unlike reply. Please try again."]);
+            }
+        } catch (PDOException $e) {
+            return json_encode(["error" => "Error occurred: " . $e->getMessage()]);
+        } finally {
+            $stmt = null; // Cleanup
+        }
+    }
+
+
 }
 
 $posts = new Posts();
@@ -622,9 +772,23 @@ try {
                     echo $posts->likeComment($json);
                     break;
 
+                case "addCommentReply":
+                    echo $posts->addCommentReply($json);
+                    break;
+
                 case "unlikeComment":
                     echo $posts->unlikeComment($json);
                     break;
+
+                case "likeReply":
+                    echo $posts->likeReply($json);
+                    break;
+
+                case "unlikeReply":
+                    echo $posts->unlikeReply($json);
+                    break;
+
+
 
                 default:
                     echo json_encode(array("error" => "Invalid Operation"));
