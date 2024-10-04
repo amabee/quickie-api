@@ -34,43 +34,46 @@ class Posts
 
         $expiry_datetime = calculateExpiryDatetime($expiry_duration);
 
-        // Correct placeholder in the SQL query
+        // Random cooldown between 5 minutes and 2 hours (in seconds)
+        $cooldown_duration = rand(300, 7200); // 300 = 5 mins, 7200 = 2 hours
+
+        // Prepare the query for inserting the post
         $query = "INSERT INTO posts (user_id, content, timestamp, expiry_duration) VALUES (:user_id, :content, NOW(), :expiry_datetime)";
 
         try {
             $this->conn->beginTransaction();
 
-            // Insert post
+            // Insert the post
             $stmt = $this->conn->prepare($query);
             $stmt->bindParam(':user_id', $user_id, PDO::PARAM_INT);
             $stmt->bindParam(':content', $content, PDO::PARAM_STR);
-            // Change this to match the placeholder in the query
             $stmt->bindParam(':expiry_datetime', $expiry_datetime, PDO::PARAM_STR);
             $stmt->execute();
 
             $post_id = $this->conn->lastInsertId();
-            error_log($expiry_datetime);
+
+            // Insert cooldown into post_cooldown table
+            $cooldown_query = "INSERT INTO post_cooldown (user_id, last_post_time, cooldown_duration) 
+                               VALUES (:user_id, NOW(), :cooldown_duration)";
+            $cooldown_stmt = $this->conn->prepare($cooldown_query);
+            $cooldown_stmt->bindParam(':user_id', $user_id, PDO::PARAM_INT);
+            $cooldown_stmt->bindParam(':cooldown_duration', $cooldown_duration, PDO::PARAM_INT);
+            $cooldown_stmt->execute();
+
             // Handle image uploads
             $image_names = [];
             if (isset($_FILES['images']) && is_array($_FILES['images']['name'])) {
                 $total_files = count($_FILES['images']['name']);
                 for ($i = 0; $i < $total_files; $i++) {
-                    // Debugging: log file information
-                    error_log("Processing file: " . $_FILES['images']['name'][$i]);
-
                     if ($_FILES['images']['error'][$i] == UPLOAD_ERR_OK) {
                         $image_name = sanitizeInput($_FILES['images']['name'][$i]);
                         $temp_name = $_FILES['images']['tmp_name'][$i];
                         $upload_dir = 'POST_IMAGES/';
                         $target_file = $upload_dir . basename($image_name);
 
-                        // Debugging: log target file path
-                        error_log("Target file path: " . $target_file);
-
                         if (move_uploaded_file($temp_name, $target_file)) {
                             // Image uploaded successfully
-                            $image_names[] = $image_name; // Store the image name
-                            error_log("Image uploaded: " . $image_name); // Log uploaded image name
+                            $image_names[] = $image_name;
 
                             // Insert image record
                             $image_query = "INSERT INTO images (post_id, image_url) VALUES (:post_id, :image_name)";
@@ -86,7 +89,6 @@ class Posts
                     }
                 }
             }
-
 
             $this->conn->commit();
             echo json_encode(array("success" => true, "message" => "Post created successfully", "image_names" => $image_names));
@@ -116,11 +118,13 @@ class Posts
             $limit = isset($json['limit']) ? (int) $json['limit'] : 10;
             $offset = isset($json['offset']) ? (int) $json['offset'] : 0;
 
-            // SQL query to get posts, their authors, images, and reactions (if liked by the user)
+            // SQL query to get posts, their authors, images, and reactions (if liked by the user),
+            // and the total number of likes for each post
             $sql = 'SELECT posts.`post_id`, posts.`user_id`, posts.`content`, posts.`timestamp`, posts.`expiry_duration`, 
                            users.first_name, users.last_name, users.username, users.profile_image, 
                            GROUP_CONCAT(images.image_url) AS post_images, 
-                           IF(reactions.`reaction_type` = "like", 1, 0) AS liked_by_user 
+                           IF(reactions.`reaction_type` = "like", 1, 0) AS liked_by_user, 
+                           (SELECT COUNT(*) FROM `reactions` WHERE `post_id` = posts.`post_id` AND `reaction_type` = "like") AS like_count 
                     FROM `posts`
                     LEFT JOIN `follows` ON posts.`user_id` = follows.`following_id` AND follows.`follower_id` = :userId
                     JOIN `users` ON posts.`user_id` = users.`user_id`
@@ -232,11 +236,6 @@ class Posts
     {
         $data = json_decode($json, true);
 
-        // Validate input
-
-        // if (!isset($data['user_id']) || !isset($data['post_id'])) {
-        //     return json_encode(["error" => "Missing Data"]);
-        // }
 
         if (!isset($data['user_id'])) {
             return json_encode(["error" => "Missing User ID"]);
@@ -248,7 +247,7 @@ class Posts
 
         $user_id = (int) sanitizeInput($data['user_id']);
         $post_id = (int) sanitizeInput($data['post_id']);
-        $reaction_type = 'like'; // Default reaction type
+        $reaction_type = 'like';
 
         try {
 
@@ -326,19 +325,19 @@ class Posts
     public function getCommentsByPostId($json)
     {
         $data = json_decode($json, true);
-    
+
         // Validate and sanitize input
         if (!isset($data['post_id'])) {
             return json_encode(["error" => "Post ID is required"]);
         }
-    
+
         if (!isset($data['user_id'])) {
             return json_encode(["error" => "User ID is required"]);
         }
-    
+
         $post_id = (int) sanitizeInput($data['post_id']);
         $user_id = (int) sanitizeInput($data['user_id']);
-    
+
         try {
             // Fetch main comments
             $sqlMainComments = "SELECT 
@@ -359,14 +358,14 @@ class Posts
                             LEFT JOIN comment_reactions cr ON c.comment_id = cr.comment_id AND cr.user_id = :user_id
                             WHERE c.post_id = :post_id
                             ORDER BY c.timestamp DESC";
-    
+
             $stmtMainComments = $this->conn->prepare($sqlMainComments);
             $stmtMainComments->bindParam(':post_id', $post_id, PDO::PARAM_INT);
             $stmtMainComments->bindParam(':user_id', $user_id, PDO::PARAM_INT);
             $stmtMainComments->execute();
-    
+
             $mainComments = $stmtMainComments->fetchAll(PDO::FETCH_ASSOC);
-    
+
             // Fetch all replies, including whether the current user liked them
             $sqlReplies = "SELECT 
                             ct.id, 
@@ -388,14 +387,14 @@ class Posts
                         LEFT JOIN reply_reactions rr ON ct.id = rr.reply_id AND rr.user_id = :user_id
                         WHERE ct.post_id = :post_id
                         ORDER BY ct.timestamp";
-    
+
             $stmtReplies = $this->conn->prepare($sqlReplies);
             $stmtReplies->bindParam(':post_id', $post_id, PDO::PARAM_INT);
             $stmtReplies->bindParam(':user_id', $user_id, PDO::PARAM_INT);
             $stmtReplies->execute();
-    
+
             $replies = $stmtReplies->fetchAll(PDO::FETCH_ASSOC);
-    
+
             // Group replies by main_id and parent_id
             $replyMap = [];
             foreach ($replies as $reply) {
@@ -413,11 +412,11 @@ class Posts
                     'liked_by_user' => $reply['liked_by_user'],
                     'replies' => [] // Initialize empty array for child replies
                 ];
-    
+
                 // Group replies by main_id and parent_id
                 $replyMap[$reply['main_id']][$reply['parent_id']][] = $replyData;
             }
-    
+
             // Recursive function to structure nested replies
             function buildReplyTree($parentId, $mainId, &$replyMap)
             {
@@ -431,7 +430,7 @@ class Posts
                 }
                 return $nestedReplies;
             }
-    
+
             // Structure comments and their replies
             $structuredComments = [];
             foreach ($mainComments as $comment) {
@@ -447,15 +446,15 @@ class Posts
                     'liked_by_user' => $comment['liked_by_user'],
                     'replies' => []
                 ];
-    
+
                 // Add top-level replies (where parent_id is null) to this comment
                 $commentData['replies'] = buildReplyTree(null, $comment['comment_id'], $replyMap);
-    
+
                 $structuredComments[] = $commentData;
             }
-    
+
             return json_encode(["success" => $structuredComments]);
-    
+
         } catch (PDOException $e) {
             error_log($e->getMessage());
             return json_encode(["error" => $e->getMessage()]);

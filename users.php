@@ -93,12 +93,27 @@ class User
 
         try {
             $sql = "
-            SELECT u.user_id, u.first_name, u.last_name, u.username, u.email, u.profile_image
-            FROM users u
-            LEFT JOIN follows f ON f.following_id = u.user_id AND f.follower_id = :user_id
-            WHERE u.user_id != :user_id
-            AND f.following_id IS NULL
-            LIMIT 10;
+                            SELECT 
+                        u.user_id, 
+                        u.first_name, 
+                        u.last_name, 
+                        u.username, 
+                        u.email, 
+                        u.profile_image,
+                        COUNT(f2.follower_id) AS follower_count
+                    FROM 
+                        users u
+                    LEFT JOIN 
+                        follows f ON f.following_id = u.user_id AND f.follower_id = :user_id
+                    LEFT JOIN 
+                        follows f2 ON f2.following_id = u.user_id
+                    WHERE 
+                        u.user_id != :user_id
+                        AND f.following_id IS NULL
+                    GROUP BY 
+                        u.user_id
+                    LIMIT 10;
+                    ;
         ";
 
             $stmt = $this->conn->prepare($sql);
@@ -469,6 +484,56 @@ class User
         }
     }
 
+    public function canPost($json)
+    {
+        $data = json_decode($json, true);
+
+        if (!isset($data['user_id'])) {
+            return json_encode(array("error" => "Invalid user id"));
+        }
+
+        $user_id = (int) sanitizeInput($data['user_id']); // Sanitize input
+
+        try {
+            // SQL query to get the last post time and cooldown duration for the user
+            $sql = "SELECT last_post_time, cooldown_duration 
+                FROM post_cooldown 
+                WHERE user_id = :user_id";
+
+            $stmt = $this->conn->prepare($sql);
+            $stmt->bindParam(':user_id', $user_id, PDO::PARAM_INT);
+            $stmt->execute();
+            $result = $stmt->fetch(PDO::FETCH_ASSOC);
+
+            // If no cooldown record found, user can post
+            if (!$result) {
+                return json_encode(["can_post" => true]);
+            }
+
+            // Calculate the next allowed post time
+            $last_post_time = new DateTime($result['last_post_time']);
+            $cooldown_duration = (int) $result['cooldown_duration']; // Ensure it's treated as an integer
+            $now = new DateTime();
+
+            // Add cooldown duration (in seconds) to last post time
+            $next_allowed_post_time = clone $last_post_time;
+            $next_allowed_post_time->modify("+{$cooldown_duration} seconds");
+
+            // Check if current time is greater than or equal to the next allowed post time
+            if ($now >= $next_allowed_post_time) {
+                return json_encode(["can_post" => true]);
+            } else {
+                $remaining_time = $now->diff($next_allowed_post_time);
+                return json_encode([
+                    "can_post" => false,
+                    "remaining_time" => $remaining_time->format('%h hours, %i minutes, and %s seconds')
+                ]);
+            }
+
+        } catch (PDOException $e) {
+            return json_encode(["error" => $e->getMessage()]);
+        }
+    }
 
 
 }
@@ -517,6 +582,11 @@ try {
                 case "updateProfile":
                     echo $user->updateProfile($_REQUEST["json"], $_FILES);
                     break;
+
+                case "canPostAgain":
+                    echo $user->canPost($json);
+                    break;
+
 
                 default:
                     echo json_encode(array("error" => "Invalid Operation"));
