@@ -492,34 +492,25 @@ class User
             return json_encode(array("error" => "Invalid user id"));
         }
 
-        $user_id = (int) sanitizeInput($data['user_id']); // Sanitize input
+        $user_id = (int) sanitizeInput($data['user_id']);
 
         try {
-            // SQL query to get the last post time and cooldown duration for the user
-            $sql = "SELECT last_post_time, cooldown_duration 
-                FROM post_cooldown 
-                WHERE user_id = :user_id";
+            $sql = "SELECT next_allowed_post_time 
+            FROM post_cooldown 
+            WHERE user_id = :user_id";
 
             $stmt = $this->conn->prepare($sql);
             $stmt->bindParam(':user_id', $user_id, PDO::PARAM_INT);
             $stmt->execute();
             $result = $stmt->fetch(PDO::FETCH_ASSOC);
 
-            // If no cooldown record found, user can post
             if (!$result) {
                 return json_encode(["can_post" => true]);
             }
 
-            // Calculate the next allowed post time
-            $last_post_time = new DateTime($result['last_post_time']);
-            $cooldown_duration = (int) $result['cooldown_duration']; // Ensure it's treated as an integer
             $now = new DateTime();
+            $next_allowed_post_time = new DateTime($result['next_allowed_post_time']);
 
-            // Add cooldown duration (in seconds) to last post time
-            $next_allowed_post_time = clone $last_post_time;
-            $next_allowed_post_time->modify("+{$cooldown_duration} seconds");
-
-            // Check if current time is greater than or equal to the next allowed post time
             if ($now >= $next_allowed_post_time) {
                 return json_encode(["can_post" => true]);
             } else {
@@ -534,6 +525,75 @@ class User
             return json_encode(["error" => $e->getMessage()]);
         }
     }
+
+    public function insertCooldown($json)
+    {
+        $data = json_decode($json, true);
+
+        if (!isset($data['user_id'])) {
+            return json_encode(["error" => "Missing user_id"]);
+        }
+
+        $user_id = (int) sanitizeInput($data['user_id']);
+
+        $minCooldown = 30 * 60;
+        $maxCooldown = 2 * 60 * 60;
+        $cooldown_duration = rand($minCooldown, $maxCooldown);
+
+        $now = new DateTime();
+        $next_allowed_post_time = clone $now;
+        $next_allowed_post_time->modify("+{$cooldown_duration} seconds");
+
+        $next_time = $next_allowed_post_time->format('Y-m-d H:i:s');
+
+        $cooldown_query = "INSERT INTO post_cooldown (user_id, next_allowed_post_time) 
+                       VALUES (:user_id, :next_allowed_post_time)
+                       ON DUPLICATE KEY UPDATE next_allowed_post_time = :next_allowed_post_time";
+
+        try {
+            $cooldown_stmt = $this->conn->prepare($cooldown_query);
+            $cooldown_stmt->bindParam(':user_id', $user_id, PDO::PARAM_INT);
+            $cooldown_stmt->bindParam(':next_allowed_post_time', $next_time, PDO::PARAM_STR);
+            $cooldown_stmt->execute();
+
+            return json_encode(["success" => "Cooldown inserted/updated successfully"]);
+
+        } catch (PDOException $e) {
+            return json_encode(["error" => "Failed to insert/update cooldown: " . $e->getMessage()]);
+        }
+    }
+
+    public function fetchNotifications($json)
+    {
+        $data = json_decode($json, true);
+
+        if (!isset($data['user_id'])) {
+            return json_encode(["error" => "Missing User ID"]);
+        }
+
+        $user_id = (int) sanitizeInput($data['user_id']);
+
+        try {
+            $query = "SELECT notification_id, type, message, related_post_id, is_read, created_at , users.first_name, users.last_name, users.profile_image
+                      FROM notifications 
+                      INNER JOIN users ON notifications.user_id = users.user_id
+                      WHERE target_user = :user_id
+                      ORDER BY created_at DESC";
+
+            $stmt = $this->conn->prepare($query);
+            $stmt->bindParam(':user_id', $user_id, PDO::PARAM_INT);
+            $stmt->execute();
+
+            $notifications = $stmt->fetchAll(PDO::FETCH_ASSOC);
+
+            return json_encode(["success" => $notifications]);
+        } catch (PDOException $e) {
+            return json_encode(["error" => "Failed to fetch notifications: " . $e->getMessage()]);
+        } finally {
+            $stmt = null;
+        }
+    }
+
 
 
 }
@@ -585,6 +645,14 @@ try {
 
                 case "canPostAgain":
                     echo $user->canPost($json);
+                    break;
+
+                case "updatePostTime":
+                    echo $user->insertCooldown($json);
+                    break;
+
+                case "fetchNotifications":
+                    echo $user->fetchNotifications($json);
                     break;
 
 

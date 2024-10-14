@@ -16,6 +16,64 @@ class Posts
         $this->conn = DatabaseConnection::getInstance()->getConnection();
     }
 
+    private function notifHandler($userID, $targetID, $postID, $type, $message)
+    {
+        switch ($type) {
+            case "like":
+                $this->likeNotif($userID, $targetID, $postID, $type, $message);
+                break;
+            case "comment":
+                $this->commentNotif($userID, $targetID, $postID, $type, $message);
+                break;
+
+            default:
+                break;
+        }
+    }
+
+    private function likeNotif($userID, $targetUserID, $postID, $type, $message)
+    {
+        try {
+            $query = "INSERT INTO notifications (user_id, target_user, type, message, related_post_id, is_read) 
+                  VALUES (:user_id, :target_user, :type, :message, :related_post_id, 0)";
+
+            $stmt = $this->conn->prepare($query);
+            $stmt->bindParam(':user_id', $userID, PDO::PARAM_INT);
+            $stmt->bindParam(':target_user', $targetUserID, PDO::PARAM_INT);
+            $stmt->bindParam(':type', $type, PDO::PARAM_STR);
+            $stmt->bindParam(':message', $message, PDO::PARAM_STR);
+            $stmt->bindParam(':related_post_id', $postID, PDO::PARAM_INT);
+            $stmt->execute();
+
+            return json_encode(["success" => true, "message" => "Notification created successfully"]);
+        } catch (PDOException $e) {
+            return json_encode(["error" => "Failed to create notification: " . $e->getMessage()]);
+        }
+    }
+
+    private function commentNotif($userID, $targetUserID, $postID, $type, $message)
+    {
+        try {
+            $query = "INSERT INTO notifications (user_id, target_user, type, message, related_post_id, is_read) 
+                  VALUES (:user_id, :target_user, :type, :message, :related_post_id, 0)";
+
+            $stmt = $this->conn->prepare($query);
+            $stmt->bindParam(':user_id', $userID, PDO::PARAM_INT);
+            $stmt->bindParam(':target_user', $targetUserID, PDO::PARAM_INT);
+            $stmt->bindParam(':type', $type, PDO::PARAM_STR);
+            $stmt->bindParam(':message', $message, PDO::PARAM_STR);
+            $stmt->bindParam(':related_post_id', $postID, PDO::PARAM_INT);
+            $stmt->execute();
+
+            return json_encode(["success" => true, "message" => "Notification created successfully"]);
+        } catch (PDOException $e) {
+            return json_encode(["error" => "Failed to create notification: " . $e->getMessage()]);
+        }
+    }
+
+
+
+
     // Create a new post
 
     public function createPost($json)
@@ -34,8 +92,15 @@ class Posts
 
         $expiry_datetime = calculateExpiryDatetime($expiry_duration);
 
-        // Random cooldown between 5 minutes and 2 hours (in seconds)
-        $cooldown_duration = rand(300, 7200); // 300 = 5 mins, 7200 = 2 hours
+        $cooldown_duration = rand(300, 7200);
+
+        // Calculate next allowed post time
+        $now = new DateTime();
+        $next_allowed_post_time = clone $now;
+        $next_allowed_post_time->modify("+{$cooldown_duration} seconds");
+
+        // Format the next allowed post time and assign it as a string
+        $next_time = $next_allowed_post_time->format('Y-m-d H:i:s');
 
         // Prepare the query for inserting the post
         $query = "INSERT INTO posts (user_id, content, timestamp, expiry_duration) VALUES (:user_id, :content, NOW(), :expiry_datetime)";
@@ -52,12 +117,15 @@ class Posts
 
             $post_id = $this->conn->lastInsertId();
 
-            // Insert cooldown into post_cooldown table
-            $cooldown_query = "INSERT INTO post_cooldown (user_id, last_post_time, cooldown_duration) 
-                               VALUES (:user_id, NOW(), :cooldown_duration)";
+
+
+            // Insert next allowed post time into post_cooldown table
+            $cooldown_query = "INSERT INTO post_cooldown (user_id, next_allowed_post_time) 
+                               VALUES (:user_id, :next_allowed_post_time)
+                               ON DUPLICATE KEY UPDATE next_allowed_post_time = :next_allowed_post_time";
             $cooldown_stmt = $this->conn->prepare($cooldown_query);
             $cooldown_stmt->bindParam(':user_id', $user_id, PDO::PARAM_INT);
-            $cooldown_stmt->bindParam(':cooldown_duration', $cooldown_duration, PDO::PARAM_INT);
+            $cooldown_stmt->bindParam(':next_allowed_post_time', $next_time, PDO::PARAM_STR); // Bind as string
             $cooldown_stmt->execute();
 
             // Handle image uploads
@@ -103,6 +171,7 @@ class Posts
             $stmt = null; // Cleanup
         }
     }
+
 
     // Read all posts
     public function readPosts($json)
@@ -236,7 +305,6 @@ class Posts
     {
         $data = json_decode($json, true);
 
-
         if (!isset($data['user_id'])) {
             return json_encode(["error" => "Missing User ID"]);
         }
@@ -245,19 +313,41 @@ class Posts
             return json_encode(["error" => "Missing Post ID"]);
         }
 
+        if (!isset($data["target_id"])) {
+            return json_encode(["error" => "Missing Target ID"]);
+        }
+
         $user_id = (int) sanitizeInput($data['user_id']);
         $post_id = (int) sanitizeInput($data['post_id']);
         $reaction_type = 'like';
+        $target_ID = (int) sanitizeInput($data["target_id"]);
 
         try {
-
             // Insert the like into the reactions table
             $insertQuery = "INSERT INTO reactions (user_id, post_id, reaction_type, timestamp) VALUES (:user_id, :post_id, :reaction_type, NOW())";
             $stmt = $this->conn->prepare($insertQuery);
             $stmt->bindParam(':user_id', $user_id, PDO::PARAM_INT);
             $stmt->bindParam(':post_id', $post_id, PDO::PARAM_INT);
             $stmt->bindParam(':reaction_type', $reaction_type, PDO::PARAM_STR);
+
             if ($stmt->execute()) {
+                $userQuery = "SELECT first_name, last_name FROM users WHERE user_id = :user_id";
+                $userStmt = $this->conn->prepare($userQuery);
+                $userStmt->bindParam(':user_id', $user_id, PDO::PARAM_INT);
+                $userStmt->execute();
+
+                $user = $userStmt->fetch(PDO::FETCH_ASSOC);
+
+                if ($user) {
+
+                    $fullName = $user['first_name'] . ' ' . $user['last_name'];
+                    $message = "{$fullName} liked your post.";
+                    $targetID = $target_ID;
+
+
+                    $this->notifHandler($user_id, $targetID, $post_id, $reaction_type, $message);
+                }
+
                 return json_encode(["success" => "Post liked successfully"]);
             } else {
                 return json_encode(["error" => $stmt->errorInfo()]);
@@ -266,9 +356,11 @@ class Posts
         } catch (PDOException $e) {
             return json_encode(["error" => "Failed to like post: " . $e->getMessage()]);
         } finally {
-            $stmt = null; // Cleanup
+            $stmt = null;
+            $userStmt = null;
         }
     }
+
 
     public function dislikePost($json)
     {
@@ -467,11 +559,6 @@ class Posts
     {
         $data = json_decode($json, true);
 
-        // Validate input
-        // if (!isset($data['post_id']) || !isset($data['user_id']) || !isset($data['content'])) {
-        //     return json_encode(["error" => "Missing Data"]);
-        // }
-
         if (!isset($data['user_id'])) {
             return json_encode(["error" => "Missing User ID"]);
         }
@@ -480,9 +567,15 @@ class Posts
             return json_encode(["error" => "Missing Post ID"]);
         }
 
+        if (!isset($data['target_id'])) {
+            return json_encode(["error" => "Missing Target ID"]);
+        }
+
         $post_id = (int) sanitizeInput($data['post_id']);
         $user_id = (int) sanitizeInput($data['user_id']);
         $content = sanitizeInput($data['content']);
+        $reaction_type = 'comment';
+        $target_ID = (int) sanitizeInput($data["target_id"]);
 
         try {
             // Insert the comment into the comments table
@@ -493,6 +586,23 @@ class Posts
             $stmt->bindParam(':content', $content, PDO::PARAM_STR);
 
             if ($stmt->execute()) {
+
+                $userQuery = "SELECT first_name, last_name FROM users WHERE user_id = :user_id";
+                $userStmt = $this->conn->prepare($userQuery);
+                $userStmt->bindParam(':user_id', $user_id, PDO::PARAM_INT);
+                $userStmt->execute();
+
+                $user = $userStmt->fetch(PDO::FETCH_ASSOC);
+
+                if ($user) {
+
+                    $fullName = $user['first_name'] . ' ' . $user['last_name'];
+                    $message = "{$fullName} Commented on your post.";
+                    $targetID = $target_ID;
+
+                    $this->notifHandler($user_id, $targetID, $post_id, $reaction_type, $message);
+                }
+
                 return json_encode(["success" => "Comment posted successfully"]);
             } else {
                 return json_encode(["error" => "Failed to post comment"]);
