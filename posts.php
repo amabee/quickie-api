@@ -72,8 +72,6 @@ class Posts
     }
 
 
-
-
     // Create a new post
 
     public function createPost($json)
@@ -618,11 +616,6 @@ class Posts
     {
         $data = json_decode($json, true);
 
-        // if (!isset($data['user_id']) || !isset($data['comment_id'])) {
-
-
-        //     return json_encode(["error" => "Missing Data"]);
-        // }
 
         if (!isset($data['user_id'])) {
             return json_encode(["error" => "Missing User ID"]);
@@ -631,6 +624,8 @@ class Posts
         if (!isset($data['comment_id'])) {
             return json_encode(["error" => "Missing Comment ID"]);
         }
+
+        
 
         $user_id = (int) sanitizeInput($data['user_id']);
         $comment_id = (int) sanitizeInput($data['comment_id']);
@@ -710,7 +705,7 @@ class Posts
         $post_id = (int) sanitizeInput($data['post_id']);
         $main_id = (int) sanitizeInput($data['main_id']);
         $content = sanitizeInput($data['content']);
-        $timestamp = date('Y-m-d H:i:s'); // Get the current timestamp
+        $timestamp = date('Y-m-d H:i:s');
 
         // Check if parent_id is set
         $parent_id = isset($data['parent_id']) ? (int) sanitizeInput($data['parent_id']) : null;
@@ -734,7 +729,7 @@ class Posts
             }
 
             if ($stmt->execute()) {
-                return json_encode(["success" => "Comment added successfully", "id" => $this->conn->lastInsertId()]);
+                return json_encode(["success" => "Comment added successfully"]);
             } else {
                 return json_encode(["error" => "Failed to add comment. Please try again."]);
             }

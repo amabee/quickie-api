@@ -496,8 +496,10 @@ class User
 
         try {
             $sql = "SELECT next_allowed_post_time 
-            FROM post_cooldown 
-            WHERE user_id = :user_id";
+        FROM post_cooldown 
+        WHERE user_id = :user_id 
+        ORDER BY next_allowed_post_time DESC 
+        LIMIT 1";
 
             $stmt = $this->conn->prepare($sql);
             $stmt->bindParam(':user_id', $user_id, PDO::PARAM_INT);
@@ -520,6 +522,8 @@ class User
                     "remaining_time" => $remaining_time->format('%h hours, %i minutes, and %s seconds')
                 ]);
             }
+
+
 
         } catch (PDOException $e) {
             return json_encode(["error" => $e->getMessage()]);
